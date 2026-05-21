@@ -2,7 +2,7 @@
 import logging
 import aiohttp
 import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = "8890222792:AAEU9MoI504nLuVzAVQfuAKa2tVY-SbAA10"
@@ -15,7 +15,7 @@ user_data = {} # {chat_id: {"sites": []}}
 async def check_btk(url):
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"https://{url}", timeout=5) as r:
+            async with s.get(f"https://{url.replace('https://', '')}", timeout=5) as r:
                 text = await r.text()
                 return any(k in text for k in BTK_KEYWORDS)
     except: return False
@@ -33,19 +33,31 @@ async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
+    data = query.data
 
-    if query.data == "menu_list":
+    if data == "menu_list":
         sites = user_data.get(chat_id, {}).get("sites", [])
-        text = "📋 *İzlenenler:*\n" + "\n".join([f"- {s}" for s in sites]) if sites else "Liste boş."
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="menu_back")]]))
+        if not sites:
+            await query.edit_message_text("📋 Liste boş.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="menu_back")]]))
+        else:
+            keyboard = [[InlineKeyboardButton(f"❌ Sil: {s.split(' ')[0]}", callback_data=f"del_{i}")] for i, s in enumerate(sites)]
+            keyboard.append([InlineKeyboardButton("◀️ Geri", callback_data="menu_back")])
+            await query.edit_message_text("📋 *İzlenenler (Silmek için tıkla):*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data == "menu_bw":
+    elif data.startswith("del_"):
+        index = int(data.split("_")[1])
+        if index < len(user_data[chat_id]["sites"]):
+            user_data[chat_id]["sites"].pop(index)
+            await query.answer("Silindi!")
+            await query.edit_message_text("✅ Site silindi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Listeye Dön", callback_data="menu_list")]]))
+
+    elif data == "menu_bw":
         async with aiohttp.ClientSession(headers={"Authorization": f"Token {WEBSHARE_API_KEY}"}) as s:
             async with s.get("https://proxy.webshare.io/api/v2/subscription/") as r:
                 res = await r.json()
                 await query.edit_message_text(f"📦 Bant: {res.get('bandwidth_used_gb', 0)} GB", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="menu_back")]]))
 
-    elif query.data == "menu_bal":
+    elif data == "menu_bal":
         query_gql = "{ me { workspaces { customer { creditBalance } } } }"
         async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}"}) as s:
             async with s.post("https://backboard.railway.com/graphql/v2", json={"query": query_gql}) as r:
@@ -53,7 +65,7 @@ async def button_handler(update, context):
                 bal = res.get("data", {}).get("me", {}).get("workspaces", [{}])[0].get("customer", {}).get("creditBalance", 0)
                 await query.edit_message_text(f"💳 Bakiye: ${bal}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="menu_back")]]))
 
-    elif query.data == "menu_back":
+    elif data == "menu_back":
         await query.edit_message_text("🛠 Menü:", reply_markup=get_main_menu())
 
 async def msg_handler(update, context):
