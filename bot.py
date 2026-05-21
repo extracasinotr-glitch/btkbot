@@ -1,3 +1,4 @@
+> Extracasino:
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -70,6 +71,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     print("Bot tüm özellikleri ile çalışıyor...")
     app.run_polling()
+
 
 if __name__== "__main__":
     main()
