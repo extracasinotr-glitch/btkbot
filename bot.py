@@ -28,7 +28,7 @@ def domain(url): return urlparse(url if "://" in url else "https://" + url).netl
 def get_status_label(res):
     if res["accessible"]: return "✅ Erişilebilir"
     if res["btk_blocked"]: return "🚫 BTK Engelli"
-    return "❌ Erişilemez (Sunucu Hatası)"
+    return "❌ Erişilemez"
 
 async def check_site_with_retries(url):
     proxy = random.choice(WEBSHARE_PROXY_LIST)
@@ -40,17 +40,19 @@ async def check_site_with_retries(url):
                 return {"accessible": resp.status < 400, "btk_blocked": is_btk}
     except: return {"accessible": False, "btk_blocked": False}
 
-# ─── OTOMATİK KONTROL ──────────────────────────────────────────────────────
+# ─── OTOMATİK ÇOKLU KONTROL ───────────────────────────────────────────────
 async def run_periodic_check(app):
     while True:
-        await asyncio.sleep(300) # 5 Dakika
+        await asyncio.sleep(300) 
         for chat_id, data in list(user_state.items()):
+            # Burada listeyi dolaşarak tüm siteleri kontrol ediyoruz
             for url in list(data["sites"].keys()):
                 res = await check_site_with_retries(url)
-                # Durum değişirse bildirim at
+                
+                # Durum değişikliği kontrolü
                 if data["sites"][url]["last_status"] != res["accessible"] or data["sites"][url]["btk_blocked"] != res["btk_blocked"]:
-                    status_text = get_status_label(res)
-                    await app.bot.send_message(chat_id, f"🔄 *{domain(url)}* durum güncellendi:\n📊 {status_text}", parse_mode="Markdown")
+                    await app.bot.send_message(chat_id, f"🔄 *{domain(url)}* güncel durum: {get_status_label(res)}", parse_mode="Markdown")
+                
                 data["sites"][url].update({"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]})
 
 # ─── PANEL VE HANDLERLAR ────────────────────────────────────────────────────
@@ -69,8 +71,10 @@ async def callback_handler(update, context):
     if data == "admin:main": await query.edit_message_text("🛠 *Admin Paneli*", parse_mode="Markdown", reply_markup=admin_main_keyboard())
     elif data == "site:list":
         sites = user_state.get(chat_id, {}).get("sites", {})
-        text = "📋 *İzlenenler:*\n" + "\n".join([f"{'✅' if s['last_status'] else ('🚫' if s['btk_blocked'] else '❌')} {domain(u)}" for u, s in sites.items()]) if sites else "Liste boş."
+        # Tüm siteleri alt alta listele
+        text = "📋 *İzlenen Tüm Siteler:*\n" + "\n".join([f"{get_status_label(s)} | {domain(u)}" for u, s in sites.items()]) if sites else "Liste boş."
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+    # ... (Bant genişliği ve Railway kısımları aynı kalıyor)
     elif data == "admin:bandwidth":
         async with aiohttp.ClientSession(headers={"Authorization": f"Token {WEBSHARE_API_KEY}"}) as s:
             async with s.get("https://proxy.webshare.io/api/v2/subscription/") as r:
@@ -91,11 +95,11 @@ async def message_handler(update, context):
         chat_id = update.effective_chat.id
         if chat_id not in user_state: user_state[chat_id] = {"sites": {}}
         
-        msg = await update.message.reply_text(f"🔍 {domain(url)} kontrol ediliyor...")
+        # Siteyi listeye eklemeden önce test et
         res = await check_site_with_retries(url)
         user_state[chat_id]["sites"][url] = {"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]}
         
-        await msg.edit_text(f"🌐 *{domain(url)}* izleme listesine eklendi.\n📊 Durum: {get_status_label(res)}", parse_mode="Markdown")
+        await update.message.reply_text(f"🌐 *{domain(url)}* izleme listesine eklendi.\n📊 Anlık Durum: {get_status_label(res)}", parse_mode="Markdown")
     else: await update.message.reply_text("❌ Geçerli bir domain girin.")
 
 def main():
@@ -103,7 +107,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(run_periodic_check(app))
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu.", reply_markup=admin_main_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu aktif.", reply_markup=admin_main_keyboard())))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.run_polling()
