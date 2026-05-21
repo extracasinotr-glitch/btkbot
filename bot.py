@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 # ─── FONKSİYONLAR ──────────────────────────────────────────────────────────
 def domain(url): return urlparse(url if "://" in url else "https://" + url).netloc
 
+def get_status_label(res):
+    if res["accessible"]: return "✅ Erişilebilir"
+    if res["btk_blocked"]: return "🚫 BTK Engelli"
+    return "❌ Erişilemez (Sunucu Hatası)"
+
 async def check_site_with_retries(url):
     proxy = random.choice(WEBSHARE_PROXY_LIST)
     try:
@@ -35,31 +40,17 @@ async def check_site_with_retries(url):
                 return {"accessible": resp.status < 400, "btk_blocked": is_btk}
     except: return {"accessible": False, "btk_blocked": False}
 
-async def get_webshare_stats():
-    try:
-        async with aiohttp.ClientSession(headers={"Authorization": f"Token {WEBSHARE_API_KEY}"}) as s:
-            async with s.get("https://proxy.webshare.io/api/v2/subscription/") as r:
-                return await r.json()
-    except: return {}
-
-async def get_railway_credits():
-    query = "{ me { workspaces { customer { creditBalance remainingUsageCreditBalance } } } }"
-    try:
-        async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}"}) as s:
-            async with s.post("https://backboard.railway.com/graphql/v2", json={"query": query}) as r:
-                res = await r.json()
-                return res.get("data", {}).get("me", {}).get("workspaces", [{}])[0].get("customer", {})
-    except: return {}
-
-# ─── OTOMATİK KONTROL (JobQueue yerine asyncio döngüsü) ────────────────────
+# ─── OTOMATİK KONTROL ──────────────────────────────────────────────────────
 async def run_periodic_check(app):
     while True:
-        await asyncio.sleep(300) # 5 Dakika bekle
+        await asyncio.sleep(300) # 5 Dakika
         for chat_id, data in list(user_state.items()):
             for url in list(data["sites"].keys()):
                 res = await check_site_with_retries(url)
-                if data["sites"][url]["last_status"] == True and res["btk_blocked"]:
-                    await app.bot.send_message(chat_id, f"⚠️ UYARI: *{domain(url)}* BTK tarafından engellendi!", parse_mode="Markdown")
+                # Durum değişirse bildirim at
+                if data["sites"][url]["last_status"] != res["accessible"] or data["sites"][url]["btk_blocked"] != res["btk_blocked"]:
+                    status_text = get_status_label(res)
+                    await app.bot.send_message(chat_id, f"🔄 *{domain(url)}* durum güncellendi:\n📊 {status_text}", parse_mode="Markdown")
                 data["sites"][url].update({"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]})
 
 # ─── PANEL VE HANDLERLAR ────────────────────────────────────────────────────
@@ -78,16 +69,20 @@ async def callback_handler(update, context):
     if data == "admin:main": await query.edit_message_text("🛠 *Admin Paneli*", parse_mode="Markdown", reply_markup=admin_main_keyboard())
     elif data == "site:list":
         sites = user_state.get(chat_id, {}).get("sites", {})
-        text = "📋 *İzlenenler:*\n" + "\n".join([f"{'✅' if s['last_status'] else '❌'} {domain(u)}" for u, s in sites.items()]) if sites else "Liste boş."
+        text = "📋 *İzlenenler:*\n" + "\n".join([f"{'✅' if s['last_status'] else ('🚫' if s['btk_blocked'] else '❌')} {domain(u)}" for u, s in sites.items()]) if sites else "Liste boş."
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
     elif data == "admin:bandwidth":
-        ws = await get_webshare_stats()
-        text = f"📦 *Bant Genişliği*\nKullanılan: {ws.get('bandwidth_used_gb', 'N/A')} GB"
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+        async with aiohttp.ClientSession(headers={"Authorization": f"Token {WEBSHARE_API_KEY}"}) as s:
+            async with s.get("https://proxy.webshare.io/api/v2/subscription/") as r:
+                ws = await r.json()
+        await query.edit_message_text(f"📦 *Bant Genişliği*\nKullanılan: {ws.get('bandwidth_used_gb', 'N/A')} GB", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
     elif data == "admin:railway":
-        ry = await get_railway_credits()
-        text = f"💳 *Railway Kredi*\nBakiye: ${ry.get('creditBalance', 'N/A')}"
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+        query_gql = "{ me { workspaces { customer { creditBalance } } } }"
+        async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}"}) as s:
+            async with s.post("https://backboard.railway.com/graphql/v2", json={"query": query_gql}) as r:
+                res = await r.json()
+                bal = res.get("data", {}).get("me", {}).get("workspaces", [{}])[0].get("customer", {}).get("creditBalance", "N/A")
+        await query.edit_message_text(f"💳 *Railway Bakiye:* ${bal}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
 
 async def message_handler(update, context):
     text = update.message.text.strip()
@@ -95,18 +90,20 @@ async def message_handler(update, context):
         url = "https://" + text if not text.startswith("http") else text
         chat_id = update.effective_chat.id
         if chat_id not in user_state: user_state[chat_id] = {"sites": {}}
+        
+        msg = await update.message.reply_text(f"🔍 {domain(url)} kontrol ediliyor...")
         res = await check_site_with_retries(url)
         user_state[chat_id]["sites"][url] = {"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]}
-        await update.message.reply_text(f"🌐 *{domain(url)}* izleme listesine eklendi.", parse_mode="Markdown")
+        
+        await msg.edit_text(f"🌐 *{domain(url)}* izleme listesine eklendi.\n📊 Durum: {get_status_label(res)}", parse_mode="Markdown")
     else: await update.message.reply_text("❌ Geçerli bir domain girin.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # Otomatik kontrolü arka planda başlat
     loop = asyncio.get_event_loop()
     loop.create_task(run_periodic_check(app))
     
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu aktif.", reply_markup=admin_main_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu.", reply_markup=admin_main_keyboard())))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.run_polling()
