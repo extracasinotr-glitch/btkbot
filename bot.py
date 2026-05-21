@@ -2,9 +2,10 @@
 import logging
 import random
 import aiohttp
+import asyncio
 from urllib.parse import urlparse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # ─── AYARLAR ────────────────────────────────────────────────────────────────
 BOT_TOKEN = "8890222792:AAEU9MoI504nLuVzAVQfuAKa2tVY-SbAA10"
@@ -50,14 +51,16 @@ async def get_railway_credits():
                 return res.get("data", {}).get("me", {}).get("workspaces", [{}])[0].get("customer", {})
     except: return {}
 
-# ─── OTOMATİK KONTROL ──────────────────────────────────────────────────────
-async def auto_check_job(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id, data in user_state.items():
-        for url in list(data["sites"].keys()):
-            res = await check_site_with_retries(url)
-            if data["sites"][url]["last_status"] == True and res["btk_blocked"]:
-                await context.bot.send_message(chat_id, f"⚠️ UYARI: *{domain(url)}* BTK tarafından engellendi!", parse_mode="Markdown")
-            data["sites"][url].update({"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]})
+# ─── OTOMATİK KONTROL (JobQueue yerine asyncio döngüsü) ────────────────────
+async def run_periodic_check(app):
+    while True:
+        await asyncio.sleep(300) # 5 Dakika bekle
+        for chat_id, data in list(user_state.items()):
+            for url in list(data["sites"].keys()):
+                res = await check_site_with_retries(url)
+                if data["sites"][url]["last_status"] == True and res["btk_blocked"]:
+                    await app.bot.send_message(chat_id, f"⚠️ UYARI: *{domain(url)}* BTK tarafından engellendi!", parse_mode="Markdown")
+                data["sites"][url].update({"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]})
 
 # ─── PANEL VE HANDLERLAR ────────────────────────────────────────────────────
 def admin_main_keyboard():
@@ -94,12 +97,15 @@ async def message_handler(update, context):
         if chat_id not in user_state: user_state[chat_id] = {"sites": {}}
         res = await check_site_with_retries(url)
         user_state[chat_id]["sites"][url] = {"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]}
-        await update.message.reply_text(f"🌐 *{domain(url)}* eklendi.", parse_mode="Markdown")
+        await update.message.reply_text(f"🌐 *{domain(url)}* izleme listesine eklendi.", parse_mode="Markdown")
     else: await update.message.reply_text("❌ Geçerli bir domain girin.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.job_queue.run_repeating(auto_check_job, interval=300, first=10)
+    # Otomatik kontrolü arka planda başlat
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_periodic_check(app))
+    
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu aktif.", reply_markup=admin_main_keyboard())))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
