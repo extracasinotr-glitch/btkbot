@@ -34,45 +34,75 @@ async def check_site_with_retries(url):
                 return {"accessible": resp.status < 400, "btk_blocked": is_btk}
     except: return {"accessible": False, "btk_blocked": False}
 
-# 5 DAKİKADA BİR ÇALIŞACAK OTOMATİK KONTROL
+async def get_webshare_stats():
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": f"Token {WEBSHARE_API_KEY}"}) as s:
+            async with s.get("https://proxy.webshare.io/api/v2/subscription/") as r:
+                return await r.json()
+    except: return {}
+
+async def get_railway_credits():
+    query = "{ me { workspaces { customer { creditBalance remainingUsageCreditBalance } } } }"
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {RAILWAY_API_TOKEN}"}) as s:
+            async with s.post("https://backboard.railway.com/graphql/v2", json={"query": query}) as r:
+                res = await r.json()
+                return res.get("data", {}).get("me", {}).get("workspaces", [{}])[0].get("customer", {})
+    except: return {}
+
+# ─── OTOMATİK KONTROL ──────────────────────────────────────────────────────
 async def auto_check_job(context: ContextTypes.DEFAULT_TYPE):
     for chat_id, data in user_state.items():
         for url in list(data["sites"].keys()):
             res = await check_site_with_retries(url)
-            # Eğer önceki durumu "Erişilebilir" ise ve şimdi "Engellendiyse" bildirim at
             if data["sites"][url]["last_status"] == True and res["btk_blocked"]:
                 await context.bot.send_message(chat_id, f"⚠️ UYARI: *{domain(url)}* BTK tarafından engellendi!", parse_mode="Markdown")
-            
-            data["sites"][url]["last_status"] = res["accessible"]
-            data["sites"][url]["btk_blocked"] = res["btk_blocked"]
+            data["sites"][url].update({"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]})
 
-# ─── HANDLERLAR ─────────────────────────────────────────────────────────────
+# ─── PANEL VE HANDLERLAR ────────────────────────────────────────────────────
+def admin_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Site Listesi", callback_data="site:list")],
+        [InlineKeyboardButton("📦 Bant Genişliği", callback_data="admin:bandwidth"), InlineKeyboardButton("💳 Railway Kredi", callback_data="admin:railway")]
+    ])
+
+async def callback_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat_id = update.effective_chat.id
+    
+    if data == "admin:main": await query.edit_message_text("🛠 *Admin Paneli*", parse_mode="Markdown", reply_markup=admin_main_keyboard())
+    elif data == "site:list":
+        sites = user_state.get(chat_id, {}).get("sites", {})
+        text = "📋 *İzlenenler:*\n" + "\n".join([f"{'✅' if s['last_status'] else '❌'} {domain(u)}" for u, s in sites.items()]) if sites else "Liste boş."
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+    elif data == "admin:bandwidth":
+        ws = await get_webshare_stats()
+        text = f"📦 *Bant Genişliği*\nKullanılan: {ws.get('bandwidth_used_gb', 'N/A')} GB"
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+    elif data == "admin:railway":
+        ry = await get_railway_credits()
+        text = f"💳 *Railway Kredi*\nBakiye: ${ry.get('creditBalance', 'N/A')}"
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Geri", callback_data="admin:main")]]))
+
 async def message_handler(update, context):
     text = update.message.text.strip()
     if "." in text:
+        url = "https://" + text if not text.startswith("http") else text
         chat_id = update.effective_chat.id
         if chat_id not in user_state: user_state[chat_id] = {"sites": {}}
-        
-        url = "https://" + text if not text.startswith("http") else text
         res = await check_site_with_retries(url)
         user_state[chat_id]["sites"][url] = {"last_status": res["accessible"], "btk_blocked": res["btk_blocked"]}
-        
-        status = "✅ Erişilebilir" if res["accessible"] else ("🚫 BTK Engelli" if res["btk_blocked"] else "❌ Erişilemez")
-        await update.message.reply_text(f"🌐 *{domain(url)}* eklendi.\n📊 Durum: {status}", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ Geçerli bir domain girin.")
+        await update.message.reply_text(f"🌐 *{domain(url)}* eklendi.", parse_mode="Markdown")
+    else: await update.message.reply_text("❌ Geçerli bir domain girin.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    # 5 dakikada bir (300 saniye) otomatik kontrolü başlat
-    job_queue = app.job_queue
-    job_queue.run_repeating(auto_check_job, interval=300, first=10)
-    
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu 5dk'da bir tarama yapıyor.")))
+    app.job_queue.run_repeating(auto_check_job, interval=300, first=10)
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("👋 BTK İzleme Botu aktif.", reply_markup=admin_main_keyboard())))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    logger.info("Bot 5 dakikalık periyotla başlatıldı.")
     app.run_polling()
 
 if __name__ == "__main__":
